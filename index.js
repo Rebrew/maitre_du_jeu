@@ -105,7 +105,7 @@ async function generateAdventureWithHistory(prompt, sessionHistory, channel, isN
 
   try {
     const response = await axios.post(apiConfig.baseURL, {
-      model: "gpt-4o-mini",
+      model: "gpt-4o-mini", 
       messages: sessionHistory,
       max_tokens: apiConfig.maxTokens,
       stop: ["\n\n"]
