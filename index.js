@@ -1,9 +1,8 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 
-// Configuration du client Discord
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -12,7 +11,10 @@ const client = new Client({
   ],
 });
 
-// Centralisation de la configuration API
+let themeDescriptions = loadThemeDescriptions(); // Chargement direct au démarrage
+let questHistory = loadQuestHistory(); // Chargement direct au démarrage
+
+// Centralisation de la configuration et des headers API
 const apiConfig = {
   baseURL: 'https://api.openai.com/v1/chat/completions',
   headers: {
@@ -22,37 +24,58 @@ const apiConfig = {
   maxTokens: 500,
 };
 
-// Chargement des données au démarrage
-const themeDescriptions = loadJsonFile('themes.json');
-let questHistory = loadJsonFile('questHistory.json');
-
 // Gestion centralisée des erreurs
 function handleError(error, channel) {
   console.error(`Erreur : ${error}`);
-  channel.send(`Une erreur est survenue lors de la gestion de votre requête. Erreur : ${error.message}`);
+  channel.send(`Une erreur est survenue lors de la gestion de votre requête. 
+    Erreur : ${error.message}`);
 }
 
-// Fonction principale pour démarrer le bot
+// Commande Slash
+const commands = [
+  new SlashCommandBuilder()
+    .setName('aventure')
+    .setDescription('Commence une nouvelle aventure')
+    .addStringOption(option =>
+      option.setName('theme')
+        .setDescription('Le thème de l\'aventure')
+        .setRequired(true)),
+]
+  .map(command => command.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+(async () => {
+  try {
+    console.log('Déploiement des commandes slash...');
+    await rest.put(
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      { body: commands },
+    );
+    console.log('Commandes déployées avec succès.');
+  } catch (error) {
+    console.error('Erreur lors du déploiement des commandes:', error);
+  }
+})();
+
 client.on('ready', () => {
   console.log('Le maître du jeu est en ligne');
 });
 
-// Gestion des messages entrants
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || message.channel.id !== process.env.CHANNEL_ID) return;
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isCommand()) return;
 
-  if (message.content.startsWith('!aventure')) {
-    const theme = message.content.substring('!aventure '.length).trim();
-    await startAdventure(message, theme);
-  } else {
-    await handleUserTextResponse(message);
+  const { commandName } = interaction;
+
+  if (commandName === 'aventure') {
+    const theme = interaction.options.getString('theme');
+    await startAdventure(interaction, theme);
   }
 });
 
-// Démarre une nouvelle aventure
-async function startAdventure(message, theme) {
+async function startAdventure(interaction, theme) {
   if (!themeDescriptions[theme]) {
-    await message.reply(`Thème non reconnu. Veuillez choisir parmi les suivants: ${Object.keys(themeDescriptions).join(', ')}`);
+    await interaction.reply(`Thème non reconnu. Veuillez choisir parmi les suivants: ${Object.keys(themeDescriptions).join(', ')}`);
     return;
   }
 
@@ -65,143 +88,82 @@ async function startAdventure(message, theme) {
   const prompt = `Créez une aventure unique dans un univers de ${theme}.`;
 
   try {
-    await generateAdventureWithHistory(prompt, sessionHistory, message.channel, true);
+    await generateAdventureWithHistory(prompt, sessionHistory, interaction);
   } catch (error) {
-    handleError(error, message.channel);
+    handleError(error, interaction);
   }
 }
 
-// Génère l'aventure en fonction de l'historique de la session
-async function generateAdventureWithHistory(prompt, sessionHistory, channel, isNewAdventure = false) {
+async function sendInChunksByParagraph(interaction, text) {
+  const paragraphs = text.split('\n');
+
+  for (const paragraph of paragraphs) {
+    if (paragraph.trim().length > 0) {
+      await interaction.followUp(paragraph.trim()).catch(err => console.error("Erreur lors de l'envoi :", err));
+    }
+  }
+}
+
+async function generateAdventureWithHistory(prompt, sessionHistory, interaction) {
   sessionHistory.push({ role: "user", content: prompt });
-
-  // Extraction du thème de l'aventure
-  const theme = sessionHistory.find(entry => entry.role === 'system')?.content?.match(/thème '(.*?)'/)?.[1];
-
-  // Création du prompt amélioré
-  const enhancedPrompt = `
-  Vous êtes un maître du jeu pour une aventure dans le thème '${theme}'. 
-  Votre rôle est de maintenir la cohérence narrative tout en permettant une liberté créative maximale. 
-  Assurez-vous que toutes les réponses sont cohérentes avec le thème et l'histoire en cours.
-  Si une réponse de l'utilisateur n'est pas cohérente avec le thème ou l'aventure, signalez-le et proposez une alternative qui respecte le thème.
-
-  Engagez l'utilisateur en décrivant les scènes de manière vivante et en proposant des choix concrets sur ce qu'il peut faire ensuite. Chaque réponse doit contenir au moins deux à trois options spécifiques que l'utilisateur peut choisir pour avancer dans l'histoire. Posez des questions directes pour encourager l'utilisateur à prendre des décisions importantes pour le déroulement de l'aventure.
-
-  ${!isNewAdventure ? `
-  Voici l'historique de l'aventure :
-  ${sessionHistory.map(entry => `${entry.role === 'system' ? 'Contexte' : 'Utilisateur'} : ${entry.content}`).join('\n')}
-
-  À ce stade de l'histoire, quelles sont les actions possibles pour le personnage ? Proposez des choix qui correspondent au thème et qui permettent de faire avancer l'intrigue.
-  
-  Si l'utilisateur doit faire un choix ou prendre une décision, proposez-lui au moins deux à trois options spécifiques, par exemple :
-  1. [Option 1 liée au thème]
-  2. [Option 2 liée au thème]
-  3. [Option 3 liée au thème]
-  
-  ` : ''}
-  `;
-
-  sessionHistory.push({ role: "system", content: enhancedPrompt });
 
   try {
     const response = await axios.post(apiConfig.baseURL, {
-      model: "gpt-4o-mini", 
+      model: "gpt-4",
       messages: sessionHistory,
-      max_tokens: apiConfig.maxTokens,
-      stop: ["\n\n"]
+      max_tokens: apiConfig.maxTokens
     }, { headers: apiConfig.headers });
 
     let nextPart = response.data.choices[0]?.message?.content?.trim();
-
-    console.log("Texte brut généré par l'API (sans traitement):");
-    console.log(nextPart);
 
     if (!nextPart || typeof nextPart !== 'string') {
       throw new Error("La réponse de l'API est vide ou indéfinie.");
     }
 
-    // Vérifier la longueur de la réponse
-    if (nextPart.length > 4000) {
-      nextPart = nextPart.substring(0, 3997) + '...';
-    }
-
-    await sendInChunksByParagraph(channel, nextPart);
+    await sendInChunksByParagraph(interaction, nextPart);
 
     sessionHistory.push({ role: "system", content: nextPart });
-    saveHistoryForSession(channel.id, sessionHistory);
+    saveHistoryForSession(interaction.channel.id, sessionHistory);
 
   } catch (error) {
-    handleError(error, channel);
-  }
-}
-
-// Gestion de la réponse de l'utilisateur
-async function handleUserTextResponse(message) {
-  const userResponse = message.content.trim();
-  const sessionHistory = getHistoryForSession(message.channel.id);
-
-  sessionHistory.push({ role: "user", content: userResponse });
-
-  try {
-    await generateAdventureWithHistory(userResponse, sessionHistory, message.channel);
-  } catch (error) {
-    handleError(error, message.channel);
-  }
-}
-
-// Envoie le texte par paragraphes
-async function sendInChunksByParagraph(channel, text) {
-  const paragraphs = text.split('\n');
-
-  for (const paragraph of paragraphs) {
-    if (paragraph.trim().length > 0) {
-      console.log(`Envoi du chunk (Longueur: ${paragraph.length}) : ${paragraph}`);
-      await channel.send(paragraph.trim()).catch(err => console.error("Erreur lors de l'envoi :", err));
+    if (error.response && error.response.status === 429) {
+      console.error("Limite d'API atteinte. Tentative après délai...");
+      setTimeout(async () => {
+        await generateAdventureWithHistory(prompt, sessionHistory, interaction);
+      }, 10000); // 10 secondes de délai avant de réessayer
+    } else {
+      handleError(error, interaction);
     }
   }
 }
 
-// Sauvegarde de l'historique de la session
 function saveHistoryForSession(channelId, sessionHistory) {
-  console.log("Sauvegarde de l'historique de la session :");
-
-  // Filtrer les doublons avant de sauvegarder
-  const filteredHistory = removeDuplicates(sessionHistory);
-
-  filteredHistory.forEach((entry, index) => {
-    console.log(`Entrée ${index} - Role: ${entry.role}, Content: ${entry.content}`);
-  });
-
-  questHistory[channelId] = filteredHistory;
+  const questHistory = loadQuestHistory();
+  questHistory[channelId] = sessionHistory;
   fs.writeFileSync('questHistory.json', JSON.stringify(questHistory, null, 2), 'utf-8');
 }
 
-function removeDuplicates(history) {
-  const seen = new Set();
-  return history.filter(entry => {
-    const key = `${entry.role}-${entry.content.trim()}`;
-    if (seen.has(key)) {
-      return false;
-    } else {
-      seen.add(key);
-      return true;
-    }
-  });
-}
-
-// Chargement de l'historique pour une session
-function getHistoryForSession(channelId) {
-  return questHistory[channelId] || [];
-}
-
-// Fonction générique pour charger un fichier JSON
-function loadJsonFile(fileName) {
+function loadThemeDescriptions() {
   try {
-    return JSON.parse(fs.readFileSync(fileName, 'utf-8'));
+    return JSON.parse(fs.readFileSync('themes.json', 'utf-8'));
   } catch (error) {
-    console.error(`Erreur lors du chargement de ${fileName} :`, error);
+    console.error("Erreur lors du chargement des descriptions des thèmes :", error);
     return {};
   }
+}
+
+function loadQuestHistory() {
+  try {
+    return JSON.parse(fs.readFileSync('questHistory.json', 'utf-8'));
+  } catch (error) {
+    console.error("Erreur lors du chargement de l'historique des quêtes :", error);
+    return {};
+  }
+}
+
+function getHistoryForSession(channelId) {
+  const questHistory = loadQuestHistory();
+  return questHistory[channelId] || [];
 }
 
 client.login(process.env.TOKEN);
