@@ -8,6 +8,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildIntegrations
   ],
 });
 
@@ -21,53 +22,25 @@ const apiConfig = {
     'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
     'Content-Type': 'application/json'
   },
-  maxTokens: 500,
+  maxTokens: 4000,
 };
 
 // Gestion centralisée des erreurs
-function handleError(error, channel) {
+function handleError(error, interaction) {
   console.error(`Erreur : ${error}`);
-  channel.send(`Une erreur est survenue lors de la gestion de votre requête. 
-    Erreur : ${error.message}`);
+  interaction.reply(`Une erreur est survenue lors de la gestion de votre requête. Erreur : ${error.message}`);
 }
 
-// Commande Slash
-const commands = [
-  new SlashCommandBuilder()
-    .setName('aventure')
-    .setDescription('Commence une nouvelle aventure')
-    .addStringOption(option =>
-      option.setName('theme')
-        .setDescription('Le thème de l\'aventure')
-        .setRequired(true)),
-]
-  .map(command => command.toJSON());
-
-const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-
-(async () => {
-  try {
-    console.log('Déploiement des commandes slash...');
-    await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-      { body: commands },
-    );
-    console.log('Commandes déployées avec succès.');
-  } catch (error) {
-    console.error('Erreur lors du déploiement des commandes:', error);
-  }
-})();
-
-client.on('ready', () => {
+client.once('ready', () => {
   console.log('Le maître du jeu est en ligne');
 });
 
-client.on('interactionCreate', async interaction => {
+client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
 
   const { commandName } = interaction;
 
-  if (commandName === 'aventure') {
+  if (commandName === 'Aventure') {
     const theme = interaction.options.getString('theme');
     await startAdventure(interaction, theme);
   }
@@ -94,22 +67,12 @@ async function startAdventure(interaction, theme) {
   }
 }
 
-async function sendInChunksByParagraph(interaction, text) {
-  const paragraphs = text.split('\n');
-
-  for (const paragraph of paragraphs) {
-    if (paragraph.trim().length > 0) {
-      await interaction.followUp(paragraph.trim()).catch(err => console.error("Erreur lors de l'envoi :", err));
-    }
-  }
-}
-
-async function generateAdventureWithHistory(prompt, sessionHistory, interaction) {
+async function generateAdventureWithHistory(prompt, sessionHistory, interaction, retryCount = 0) {
   sessionHistory.push({ role: "user", content: prompt });
 
   try {
     const response = await axios.post(apiConfig.baseURL, {
-      model: "gpt-4",
+      model: "gpt-4o-mini", // Utilisation du modèle gpt-4o-mini
       messages: sessionHistory,
       max_tokens: apiConfig.maxTokens
     }, { headers: apiConfig.headers });
@@ -127,12 +90,23 @@ async function generateAdventureWithHistory(prompt, sessionHistory, interaction)
 
   } catch (error) {
     if (error.response && error.response.status === 429) {
-      console.error("Limite d'API atteinte. Tentative après délai...");
+      const delay = Math.pow(2, retryCount) * 10000; // Délai exponentiel : 10s, 20s, 40s, 80s, etc.
+      console.error(`Limite d'API atteinte. Tentative après ${delay / 1000} secondes...`);
       setTimeout(async () => {
-        await generateAdventureWithHistory(prompt, sessionHistory, interaction);
-      }, 10000); // 10 secondes de délai avant de réessayer
+        await generateAdventureWithHistory(prompt, sessionHistory, interaction, retryCount + 1);
+      }, delay);
     } else {
       handleError(error, interaction);
+    }
+  }
+}
+
+async function sendInChunksByParagraph(interaction, text) {
+  const paragraphs = text.split('\n'); // Divise le texte par les sauts de ligne
+
+  for (const paragraph of paragraphs) {
+    if (paragraph.trim().length > 0) { // Assure-toi de ne pas envoyer de paragraphes vides
+      await interaction.followUp(paragraph.trim()).catch(err => console.error("Erreur lors de l'envoi :", err));
     }
   }
 }
@@ -161,9 +135,32 @@ function loadQuestHistory() {
   }
 }
 
-function getHistoryForSession(channelId) {
-  const questHistory = loadQuestHistory();
-  return questHistory[channelId] || [];
-}
+// Enregistrement de la commande Slash
+(async () => {
+  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('aventure')
+      .setDescription('Commence une nouvelle aventure dans un thème spécifique')
+      .addStringOption(option =>
+        option.setName('theme')
+          .setDescription('Le thème de l\'aventure')
+          .setRequired(true)
+      )
+      .toJSON()
+  ];
+
+  try {
+    console.log('Enregistrement des commandes slash...');
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands },
+    );
+    console.log('Commandes enregistrées avec succès.');
+  } catch (error) {
+    console.error(error);
+  }
+})();
 
 client.login(process.env.TOKEN);
